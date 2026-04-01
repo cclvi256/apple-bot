@@ -1,0 +1,13 @@
+[package]
+name = "apple-bot"
+version = "0.1.0"
+edition = "2024"
+description = "A NapCat based QQ bot implemented in Rust"
+keywords = ["qq", "bot", "napcat", "chatbot"]
+authors = ["cclvi256 <i@cclvi.cc>"]
+license = "LGPL-3.0-or-later"
+homepage = "https://github.com/cclvi256/apple-bot"
+repository = "https://github.com/cclvi256/apple-bot"
+readme = "README.md"
+
+[dependencies]
