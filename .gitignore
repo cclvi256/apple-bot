@@ -1,1 +1,5 @@
+# Cargo target directory
 /target
+
+# Specific apple-bot.kube
+apple-bot.kube
