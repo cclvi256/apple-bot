@@ -1,11 +1,11 @@
-name: 'Code Check: Build, Lint and Test'
+name: "Code Check: Build, Lint and Test"
 
 on:
   workflow_dispatch:
   push:
-    branches: [ "dev" ]
+    branches: ["dev"]
   pull_request:
-    branches: [ "dev" ]
+    branches: ["dev"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,10 +14,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run Lint
-      run: cargo clippy --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --verbose
+      - name: Run Lint
+        run: cargo clippy --verbose
+      - name: Run tests
+        run: cargo test --verbose
