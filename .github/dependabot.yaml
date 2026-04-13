@@ -1,0 +1,18 @@
+version: 2
+
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    versioning-strategy: "auto"
+    commit-message:
+      prefix: "cargo"
+    open-pull-requests-limit: 12
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    commit-message:
+      prefix: "containers"
+    open-pull-requests-limit: 6
