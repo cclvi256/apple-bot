@@ -1,13 +1,11 @@
 FROM docker.io/library/rust:1.90 AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release
-RUN rm -rf src target
+RUN cargo fetch --locked
 COPY src ./src
-RUN cargo build --release
+RUN cargo build --release --locked
 
-FROM debian:trixie-slim
+FROM debian:13-slim
 WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
