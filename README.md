@@ -2,4 +2,4 @@
 
 # Licence
 
-GNU General Public Licence v3.0 or later
+GNU General Public License v3.0 or later
