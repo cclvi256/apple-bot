@@ -1,4 +1,4 @@
-# Apple Bot
+# Cider Bot
 
 # Licence
 

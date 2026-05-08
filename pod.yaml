@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: apple-bot
+  name: cider-bot
 spec:
   containers:
     - name: napcat
@@ -26,18 +26,18 @@ spec:
           mountPath: /app/napcat/config
         - name: napcat-plugins
           mountPath: /app/napcat/plugins
-    # - name: apple-bot
-    #   image: ghcr.io/cclvi256/apple-bot:latest
+    # - name: cider-bot
+    #   image: ghcr.io/cclvi256/cider-bot:latest
     #   ports:
     #     - containerPort: 8888
     #       hostPort: 8888
   volumes:
     - name: qq-data
       persistentVolumeClaim:
-        claimName: apple-bot-qq-data
+        claimName: cider-bot-qq-data
     - name: napcat-config
       persistentVolumeClaim:
-        claimName: apple-bot-napcat-config
+        claimName: cider-bot-napcat-config
     - name: napcat-plugins
       persistentVolumeClaim:
-        claimName: apple-bot-napcat-plugins
+        claimName: cider-bot-napcat-plugins

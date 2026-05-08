@@ -1,9 +1,9 @@
 [Unit]
-Description=Apple Bot and NapCat Stack
+Description=Cider Bot and NapCat Stack
 After=network-online.target
 
 [Kube]
-Yaml=/path/to/apple-bot/pod.yaml
+Yaml=/path/to/cider-bot/pod.yaml
 Network=pasta
 
 [Install]

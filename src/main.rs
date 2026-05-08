@@ -1,4 +1,4 @@
-use apple_bot::routes::app_routes;
+use cider_bot::routes::app_routes;
 use tracing::info;
 
 #[tokio::main]
