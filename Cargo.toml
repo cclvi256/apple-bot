@@ -1,21 +1,21 @@
 [package]
-name = "apple-bot"
+name = "cider-bot"
 version = "0.1.1"
 edition = "2024"
 description = "A NapCat based QQ bot implemented in Rust"
 keywords = ["qq", "bot", "napcat", "chatbot"]
 authors = ["cclvi256 <i@cclvi.cc>"]
 license = "GPL-3.0-or-later"
-homepage = "https://github.com/cclvi256/apple-bot"
-repository = "https://github.com/cclvi256/apple-bot"
+homepage = "https://github.com/cclvi256/cider-bot"
+repository = "https://github.com/cclvi256/cider-bot"
 readme = "README.md"
 
 [lib]
-name = "apple_bot"
+name = "cider_bot"
 path = "src/lib.rs"
 
 [[bin]]
-name = "apple-bot"
+name = "cider-bot"
 path = "src/main.rs"
 
 [dependencies]
