@@ -1,0 +1,233 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cider-bot
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: napcat-qq
+  namespace: cider-bot
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: napcat-config
+  namespace: cider-bot
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cider-bot
+  namespace: cider-bot
+data:
+  config.toml: |
+    [server]
+    listen = "0.0.0.0:8080"
+    max_body_bytes = 1048576
+
+    [database]
+    url = "sqlite:///data/cider-bot.sqlite?mode=rwc"
+
+    [bot]
+    owners = ["REPLACE_OWNER_QQ"]
+
+    [napcat]
+    base_url = "http://napcat:3000"
+    timeout_ms = 3000
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cider-bot
+  namespace: cider-bot
+type: Opaque
+stringData:
+  secret.toml: |
+    [database]
+    url = "postgres://REPLACE_USER:REPLACE_PASSWORD@REPLACE_POSTGRES_HOST:5432/REPLACE_DATABASE"
+
+    [napcat]
+    webhook_token = "REPLACE_WEBHOOK_TOKEN"
+    api_token = "REPLACE_API_TOKEN"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: napcat
+  namespace: cider-bot
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: napcat
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: napcat
+    spec:
+      containers:
+        - name: napcat
+          image: docker.io/mlikiowa/napcat-docker:latest # Pin a tested tag or digest.
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NAPCAT_UID
+              value: "1000"
+            - name: NAPCAT_GID
+              value: "1000"
+          ports:
+            - name: onebot-http
+              containerPort: 3000
+            - name: webui
+              containerPort: 6099
+          volumeMounts:
+            - name: qq
+              mountPath: /app/.config/QQ
+            - name: config
+              mountPath: /app/napcat/config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+      volumes:
+        - name: qq
+          persistentVolumeClaim:
+            claimName: napcat-qq
+        - name: config
+          persistentVolumeClaim:
+            claimName: napcat-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: napcat
+  namespace: cider-bot
+spec:
+  selector:
+    app.kubernetes.io/name: napcat
+  ports:
+    - name: onebot-http
+      port: 3000
+      targetPort: onebot-http
+    - name: webui
+      port: 6099
+      targetPort: webui
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cider-bot
+  namespace: cider-bot
+spec:
+  replicas: 1
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cider-bot
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cider-bot
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: cider-bot
+          image: registry.example.com/cider-bot:0.1.0 # Replace with an immutable image.
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CIDER_CONFIG_FILE
+              value: /etc/cider-bot/config.toml
+            - name: CIDER_SECRET_FILE
+              value: /etc/cider-bot/secret.toml
+            - name: RUST_LOG
+              value: info
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          volumeMounts:
+            - name: public-config
+              mountPath: /etc/cider-bot/config.toml
+              subPath: config.toml
+              readOnly: true
+            - name: secret-config
+              mountPath: /etc/cider-bot/secret.toml
+              subPath: secret.toml
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: public-config
+          configMap:
+            name: cider-bot
+        - name: secret-config
+          secret:
+            secretName: cider-bot
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cider-bot
+  namespace: cider-bot
+spec:
+  selector:
+    app.kubernetes.io/name: cider-bot
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: napcat-webui
+  namespace: cider-bot
+spec:
+  parentRefs:
+    - name: public
+      namespace: gateway-system
+      sectionName: https
+  hostnames:
+    - napcat.example.com
+  rules:
+    - backendRefs:
+        - name: napcat
+          port: 6099

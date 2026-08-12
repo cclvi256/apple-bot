@@ -1,5 +1,7 @@
-# Cargo target directory
 /target
-
-# Specific cider-bot.kube
-cider-bot.kube
+/.env
+/config/secret.toml
+/config/secret.postgres.toml
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
