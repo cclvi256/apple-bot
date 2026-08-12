@@ -1,16 +1,16 @@
-FROM docker.io/library/rust:latest AS builder
-WORKDIR /app
+FROM docker.io/library/rust:1.97-bookworm AS builder
+WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-RUN cargo fetch --locked
-COPY src ./src
-RUN cargo build --release --locked
+COPY crates ./crates
+RUN cargo build --locked --release -p cider-bot
 
-FROM debian:stable-slim
-WORKDIR /app
+FROM docker.io/library/debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/cider-bot /usr/local/bin/cider-bot
-EXPOSE 8888
-CMD ["cider-bot"]
+    && apt-get install --no-install-recommends -y ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin cider \
+    && install -d -o cider -g cider /data /etc/cider-bot
+COPY --from=builder /build/target/release/cider-bot /usr/local/bin/cider-bot
+USER 10001:10001
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/cider-bot"]

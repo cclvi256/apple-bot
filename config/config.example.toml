@@ -1,0 +1,13 @@
+[server]
+listen = "0.0.0.0:8080"
+max_body_bytes = 1048576
+
+[database]
+url = "sqlite:///data/cider-bot.sqlite?mode=rwc"
+
+[bot]
+owners = ["100001"]
+
+[napcat]
+base_url = "http://napcat:3000"
+timeout_ms = 3000

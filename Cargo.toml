@@ -1,25 +1,28 @@
-[package]
-name = "cider-bot"
-version = "0.1.1"
+[workspace]
+resolver = "3"
+members = [
+    "crates/*"
+]
+
+[workspace.package]
+version = "0.1.0"
 edition = "2024"
-description = "A NapCat based QQ bot implemented in Rust"
-keywords = ["qq", "bot", "napcat", "chatbot"]
-authors = ["cclvi256 <i@cclvi.cc>"]
-license = "GPL-3.0-or-later"
-homepage = "https://github.com/cclvi256/cider-bot"
+license = "Apache-2.0"
 repository = "https://github.com/cclvi256/cider-bot"
-readme = "README.md"
 
-[lib]
-name = "cider_bot"
-path = "src/lib.rs"
-
-[[bin]]
-name = "cider-bot"
-path = "src/main.rs"
-
-[dependencies]
-axum = "0.8.9"
-tokio = { version = "1.52.2", features = ["full"] }
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+[workspace.dependencies]
+axum = "0.8"
+hex = "0.4"
+hmac = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["any", "macros", "migrate", "postgres", "runtime-tokio-rustls", "sqlite"] }
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+toml = "0.9"
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
