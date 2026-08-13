@@ -10,10 +10,35 @@ use crate::{
     config::Config,
     napcat::NapcatClient,
     protocol::{Event, Id, MessageSegment, QuickOperation},
-    store::{FeatureKey, FeatureRecord, FeatureStore, StoreError},
+    store::{FeatureKey, FeatureManifest, FeatureRecord, FeatureStore, StoreError},
 };
 
 const DICE: &str = "dice";
+const SESSION_MODE: &str = "session_mode";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum DiceSessionMode {
+    Strict,
+    #[default]
+    Common,
+}
+
+impl DiceSessionMode {
+    fn from_manifest(manifest: &FeatureManifest) -> Self {
+        match manifest.values().get(SESSION_MODE) {
+            Some(toml::Value::String(value)) if value == "strict" => Self::Strict,
+            Some(toml::Value::String(value)) if value == "common" => Self::Common,
+            None => Self::Common,
+            Some(value) => {
+                tracing::warn!(
+                    session_mode = %value,
+                    "invalid dice session mode; using the default"
+                );
+                Self::Common
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct GroupKey {
@@ -188,13 +213,21 @@ impl Bot {
                 } else if !self.is_enabled(&group).await {
                     text("Dice statistics is disabled in this group.")
                 } else {
+                    let session_mode = self.dice_session_mode(&group).await;
                     let mut sessions = self.sessions.lock().await;
-                    if let std::collections::hash_map::Entry::Vacant(entry) = sessions.entry(group)
-                    {
-                        entry.insert(DiceSession::default());
-                        text("Dice session started.")
-                    } else {
-                        text("A dice session is already active.")
+                    match sessions.entry(group.clone()) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(DiceSession::default());
+                            text("Dice session started.")
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            if session_mode == DiceSessionMode::Strict {
+                                text("A dice session is already active.")
+                            } else {
+                                let previous = entry.insert(DiceSession::default());
+                                QuickOperation::reply(statistics_message(&previous.rolls))
+                            }
+                        }
                     }
                 }
             }
@@ -229,6 +262,15 @@ impl Bot {
             .await
             .get(&group.feature())
             .is_some_and(|record| record.enabled)
+    }
+
+    async fn dice_session_mode(&self, group: &GroupKey) -> DiceSessionMode {
+        self.features
+            .read()
+            .await
+            .get(&group.feature())
+            .map(|record| DiceSessionMode::from_manifest(&record.manifest))
+            .unwrap_or_default()
     }
 
     fn can_administer(&self, user_id: &Id, role: Role) -> bool {
@@ -278,6 +320,28 @@ mod tests {
         let config = Config::for_test(url.clone());
         let store = FeatureStore::connect(&url).await.unwrap();
         Bot::new(&config, store, HashMap::new())
+    }
+
+    async fn test_bot_with_enabled_dice(manifest: Option<&str>) -> Bot {
+        let directory = tempdir().unwrap().keep();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.join("bot.sqlite").display()
+        );
+        let config = Config::for_test(url.clone());
+        let store = FeatureStore::connect(&url).await.unwrap();
+        let feature = GroupKey {
+            self_id: "999".into(),
+            group_id: "200".into(),
+        }
+        .feature();
+        store.enable(&feature, "10000").await.unwrap();
+        if let Some(source) = manifest {
+            let manifest = FeatureManifest::from_toml(source).unwrap();
+            store.update_manifest(&feature, &manifest).await.unwrap();
+        }
+        let features = store.load_all().await.unwrap();
+        Bot::new(&config, store, features)
     }
 
     fn event(user: &str, role: &str, message: Vec<MessageSegment>) -> Event {
@@ -411,5 +475,72 @@ mod tests {
             disabled,
             QuickOperation::text("Dice statistics is disabled in this group.")
         );
+    }
+
+    #[tokio::test]
+    async fn strict_session_mode_rejects_dice_during_an_active_session() {
+        let bot = test_bot_with_enabled_dice(Some("session_mode = \"strict\"\n")).await;
+        bot.process(event("30", "member", vec![MessageSegment::text(".dice")]))
+            .await
+            .unwrap();
+        bot.process(event("30", "member", vec![dice("4")]))
+            .await
+            .unwrap();
+
+        let response = bot
+            .process(event("31", "member", vec![MessageSegment::text(".dice")]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            response,
+            QuickOperation::text("A dice session is already active.")
+        );
+
+        let stats = bot
+            .process(event("31", "member", vec![MessageSegment::text(".ecid")]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stats,
+            QuickOperation::reply(statistics_message(&[(Id::new("30").unwrap(), 4)]))
+        );
+    }
+
+    #[tokio::test]
+    async fn common_session_mode_publishes_statistics_and_starts_a_new_session() {
+        for manifest in [None, Some("session_mode = \"common\"\n")] {
+            let bot = test_bot_with_enabled_dice(manifest).await;
+            bot.process(event("40", "member", vec![MessageSegment::text(".dice")]))
+                .await
+                .unwrap();
+            bot.process(event("40", "member", vec![dice("5")]))
+                .await
+                .unwrap();
+
+            let stats = bot
+                .process(event("41", "member", vec![MessageSegment::text(".dice")]))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                stats,
+                QuickOperation::reply(statistics_message(&[(Id::new("40").unwrap(), 5)]))
+            );
+
+            bot.process(event("41", "member", vec![dice("2")]))
+                .await
+                .unwrap();
+            let new_stats = bot
+                .process(event("42", "member", vec![MessageSegment::text(".ecid")]))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                new_stats,
+                QuickOperation::reply(statistics_message(&[(Id::new("41").unwrap(), 2)]))
+            );
+        }
     }
 }
