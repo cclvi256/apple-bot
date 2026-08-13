@@ -6,10 +6,12 @@
 
 - `.enable dice` — enable the feature (bot owner or group owner/admin).
 - `.disable dice` — disable it and discard an active session (same permissions).
-- `.dice` — start an in-memory session (any member).
+- `.dice` — start an in-memory session (any member). During an active session, its behavior is controlled by `session_mode`.
 - `.ecid` — end the session and publish scores 6 through 1 (any member).
 
-Only the first dice message from each QQ is counted. Active sessions disappear when the bot restarts. Group feature records are stored with SQLx in SQLite by default or PostgreSQL when the configured URL uses `postgres:`/`postgresql:`. Each record retains its enabled state and a format-tagged manifest when disabled. The manifest holds explicitly defined, non-default feature data. TOML is the only supported manifest format in this version; no dice manifest keys are interpreted yet.
+Only the first dice message from each QQ is counted. Active sessions disappear when the bot restarts. Group feature records are stored with SQLx in SQLite by default or PostgreSQL when the configured URL uses `postgres:`/`postgresql:`. Each record retains its enabled state and a format-tagged manifest when disabled. The manifest holds explicitly defined, non-default feature data. TOML is the only supported manifest format in this version.
+
+The dice manifest supports `session_mode = "strict" | "common"`. The default is `common`, so the key may be omitted: `.dice` during an active session publishes its statistics and immediately starts a new session. `strict` preserves the earlier behavior and replies that a session is already active.
 
 Commands may be preceded or followed by non-text segments, so `@bot .dice` works. Non-text segments between command text are preserved as typed arguments; the current commands reject them because their usage has only text arguments.
 
