@@ -13,12 +13,12 @@ pub struct FeatureKey {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ConfigFormat {
+pub enum ManifestFormat {
     Toml,
     Unsupported(String),
 }
 
-impl ConfigFormat {
+impl ManifestFormat {
     fn parse(value: String) -> Self {
         if value == "toml" {
             Self::Toml
@@ -36,11 +36,11 @@ impl ConfigFormat {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct FeatureConfiguration {
+pub struct FeatureManifest {
     values: toml::Table,
 }
 
-impl FeatureConfiguration {
+impl FeatureManifest {
     pub fn from_toml(value: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(value).map(|values| Self { values })
     }
@@ -61,9 +61,9 @@ pub struct FeatureRecord {
     pub enabled: bool,
     pub enabled_by: String,
     pub enabled_at: i64,
-    pub config_format: ConfigFormat,
-    pub config: String,
-    pub configuration: FeatureConfiguration,
+    pub manifest_format: ManifestFormat,
+    pub manifest_source: String,
+    pub manifest: FeatureManifest,
 }
 
 #[derive(Clone)]
@@ -77,8 +77,8 @@ pub enum StoreError {
     Database(#[from] sqlx::Error),
     #[error("database migration failed: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
-    #[error("failed to serialize feature configuration: {0}")]
-    ConfigSerialization(#[from] toml::ser::Error),
+    #[error("failed to serialize feature manifest: {0}")]
+    ManifestSerialization(#[from] toml::ser::Error),
     #[error("system clock is before the Unix epoch")]
     Clock,
     #[error("unsupported database URL")]
@@ -107,7 +107,7 @@ impl FeatureStore {
         let rows = sqlx::query(
             "SELECT id, self_id, group_id, feature_name, \
              CAST(CASE WHEN enabled THEN 1 ELSE 0 END AS BIGINT) AS enabled_value, \
-             enabled_by, enabled_at, config_format, config FROM group_features",
+             enabled_by, enabled_at, manifest_format, manifest FROM group_features",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -158,17 +158,17 @@ impl FeatureStore {
         }
     }
 
-    pub async fn update_configuration(
+    pub async fn update_manifest(
         &self,
         key: &FeatureKey,
-        configuration: &FeatureConfiguration,
+        manifest: &FeatureManifest,
     ) -> Result<Option<FeatureRecord>, StoreError> {
-        let config = configuration.encode()?;
+        let manifest = manifest.encode()?;
         let result = sqlx::query(
-            "UPDATE group_features SET config_format = 'toml', config = ? \
+            "UPDATE group_features SET manifest_format = 'toml', manifest = ? \
              WHERE self_id = ? AND group_id = ? AND feature_name = ?",
         )
-        .bind(config)
+        .bind(manifest)
         .bind(&key.self_id)
         .bind(&key.group_id)
         .bind(&key.feature_name)
@@ -189,7 +189,7 @@ impl FeatureStore {
         sqlx::query(
             "SELECT id, self_id, group_id, feature_name, \
              CAST(CASE WHEN enabled THEN 1 ELSE 0 END AS BIGINT) AS enabled_value, \
-             enabled_by, enabled_at, config_format, config FROM group_features \
+             enabled_by, enabled_at, manifest_format, manifest FROM group_features \
              WHERE self_id = ? AND group_id = ? AND feature_name = ?",
         )
         .bind(&key.self_id)
@@ -203,16 +203,16 @@ impl FeatureStore {
 }
 
 fn decode_record(row: sqlx::any::AnyRow) -> FeatureRecord {
-    let format = ConfigFormat::parse(row.get("config_format"));
-    let config: String = row.get("config");
-    let configuration = match &format {
-        ConfigFormat::Toml => FeatureConfiguration::from_toml(&config).unwrap_or_else(|error| {
-            tracing::warn!(%error, "invalid stored TOML feature configuration; using empty configuration");
-            FeatureConfiguration::default()
+    let format = ManifestFormat::parse(row.get("manifest_format"));
+    let manifest_source: String = row.get("manifest");
+    let manifest = match &format {
+        ManifestFormat::Toml => FeatureManifest::from_toml(&manifest_source).unwrap_or_else(|error| {
+            tracing::warn!(%error, "invalid stored TOML feature manifest; using empty manifest");
+            FeatureManifest::default()
         }),
-        ConfigFormat::Unsupported(value) => {
-            tracing::warn!(config_format = %value, "unsupported stored feature configuration format; using empty configuration");
-            FeatureConfiguration::default()
+        ManifestFormat::Unsupported(value) => {
+            tracing::warn!(manifest_format = %value, "unsupported stored feature manifest format; using empty manifest");
+            FeatureManifest::default()
         }
     };
     FeatureRecord {
@@ -225,9 +225,9 @@ fn decode_record(row: sqlx::any::AnyRow) -> FeatureRecord {
         enabled: row.get::<i64, _>("enabled_value") != 0,
         enabled_by: row.get("enabled_by"),
         enabled_at: row.get("enabled_at"),
-        config_format: format,
-        config,
-        configuration,
+        manifest_format: format,
+        manifest_source,
+        manifest,
     }
 }
 
@@ -269,27 +269,27 @@ mod tests {
         assert!(initial.id > 0);
         assert!(other.id > initial.id);
         assert!(initial.enabled);
-        assert_eq!(initial.config_format, ConfigFormat::Toml);
-        assert!(initial.config.is_empty());
+        assert_eq!(initial.manifest_format, ManifestFormat::Toml);
+        assert!(initial.manifest_source.is_empty());
 
-        let configuration = FeatureConfiguration::from_toml("answer = 42\n").unwrap();
-        let configured = store
-            .update_configuration(&first, &configuration)
+        let manifest = FeatureManifest::from_toml("answer = 42\n").unwrap();
+        let updated = store
+            .update_manifest(&first, &manifest)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(configured.id, initial.id);
-        assert_eq!(configured.configuration, configuration);
+        assert_eq!(updated.id, initial.id);
+        assert_eq!(updated.manifest, manifest);
 
         let disabled = store.disable(&first).await.unwrap().unwrap();
         assert!(!disabled.enabled);
         assert_eq!(disabled.id, initial.id);
-        assert_eq!(disabled.configuration, configuration);
+        assert_eq!(disabled.manifest, manifest);
 
         let reenabled = store.enable(&first, "31").await.unwrap();
         assert!(reenabled.enabled);
         assert_eq!(reenabled.id, initial.id);
-        assert_eq!(reenabled.configuration, configuration);
+        assert_eq!(reenabled.manifest, manifest);
         assert_eq!(reenabled.enabled_by, "31");
 
         let records = store.load_all().await.unwrap();
@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_and_unsupported_configuration_fall_back_without_overwrite() {
+    async fn invalid_and_unsupported_manifests_fall_back_without_overwrite() {
         let directory = tempdir().unwrap();
         let url = format!(
             "sqlite://{}?mode=rwc",
@@ -334,7 +334,7 @@ mod tests {
         let store = FeatureStore::connect(&url).await.unwrap();
         sqlx::query(
             "INSERT INTO group_features \
-             (self_id, group_id, feature_name, enabled, enabled_by, enabled_at, config_format, config) \
+             (self_id, group_id, feature_name, enabled, enabled_by, enabled_at, manifest_format, manifest) \
              VALUES ('1', '2', 'bad-toml', TRUE, '3', 0, 'toml', 'broken = ['), \
                     ('1', '2', 'json', TRUE, '3', 0, 'json', '{\"value\":1}')",
         )
@@ -348,16 +348,16 @@ mod tests {
             group_id: "2".into(),
             feature_name: "bad-toml".into(),
         }];
-        assert!(bad_toml.configuration.values().is_empty());
-        assert_eq!(bad_toml.config, "broken = [");
+        assert!(bad_toml.manifest.values().is_empty());
+        assert_eq!(bad_toml.manifest_source, "broken = [");
         let unsupported = &records[&FeatureKey {
             self_id: "1".into(),
             group_id: "2".into(),
             feature_name: "json".into(),
         }];
-        assert!(unsupported.configuration.values().is_empty());
-        assert_eq!(unsupported.config_format.as_str(), "json");
-        assert_eq!(unsupported.config, "{\"value\":1}");
+        assert!(unsupported.manifest.values().is_empty());
+        assert_eq!(unsupported.manifest_format.as_str(), "json");
+        assert_eq!(unsupported.manifest_source, "{\"value\":1}");
     }
 
     #[tokio::test]
