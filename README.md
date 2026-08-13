@@ -2,16 +2,20 @@
 
 `cider-bot` is a Rust OneBot 11 bot designed for NapCat. The bot core supports feature modules; dice statistics is the first and currently only module.
 
-## Dice commands
+## Commands
 
 - `.enable dice` — enable the feature (bot owner or group owner/admin).
 - `.disable dice` — disable it and discard an active session (same permissions).
 - `.dice` — start an in-memory session (any member). During an active session, its behavior is controlled by `session_mode`.
 - `.ecid` — end the session and publish scores 6 through 1 (any member).
+- `.fset feature key value` — set a manifest value (bot owner or group owner/admin).
+- `.fget feature [key]` — show a stored manifest or one manifest assignment (any member).
 
-Only the first dice message from each QQ is counted. Active sessions disappear when the bot restarts. Group feature records are stored with SQLx in SQLite by default or PostgreSQL when the configured URL uses `postgres:`/`postgresql:`. Each record retains its enabled state and a format-tagged manifest when disabled. The manifest holds explicitly defined, non-default feature data. TOML is the only supported manifest format in this version.
+Only the first dice message from each QQ is counted. Active sessions disappear when the bot restarts. Group feature records are stored with SQLx in SQLite by default or PostgreSQL when the configured URL uses `postgres:`/`postgresql:`. Each record retains its enabled state and TOML manifest when disabled. The manifest holds explicitly assigned feature data.
 
-The dice manifest supports `session_mode = "strict" | "common"`. The default is `common`, so the key may be omitted: `.dice` during an active session publishes its statistics and immediately starts a new session. `strict` preserves the earlier behavior and replies that a session is already active.
+Feature manifests are flat, schema-validated TOML documents. The dice manifest currently supports only `session_mode = "strict" | "common"`; set it with `.fset dice session_mode strict` or `.fset dice session_mode common`. The default is `common`, so the key may be omitted: `.dice` during an active session publishes its statistics and immediately starts a new session. `strict` preserves the earlier behavior and replies that a session is already active. Manifest commands operate only while the feature is enabled. Nested keys and array assignment are not supported.
+
+The initial database schema no longer contains a manifest-format discriminator. Recreate databases initialized by an earlier development version before starting this version.
 
 Commands may be preceded or followed by non-text segments, so `@bot .dice` works. Non-text segments between command text are preserved as typed arguments; the current commands reject them because their usage has only text arguments.
 
