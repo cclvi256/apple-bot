@@ -101,7 +101,7 @@ fn valid_signature(headers: &HeaderMap, body: &[u8], token: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::HashMap;
 
     use axum::{
         body::Body,
@@ -139,7 +139,7 @@ mod tests {
         );
         let config = Config::for_test(url.clone());
         let store = FeatureStore::connect(&url).await.unwrap();
-        let bot = Arc::new(Bot::new(&config, store, HashSet::new()));
+        let bot = Arc::new(Bot::new(&config, store, HashMap::new()));
         let app = router(AppState::new(bot, b"secret".to_vec(), 1024 * 1024));
         let body = br#"{
             "post_type":"message", "message_type":"group", "sub_type":"normal",
