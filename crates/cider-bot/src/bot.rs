@@ -10,7 +10,7 @@ use crate::{
     config::Config,
     napcat::NapcatClient,
     protocol::{Event, Id, MessageSegment, QuickOperation},
-    store::{FeatureKey, FeatureStore, StoreError},
+    store::{FeatureKey, FeatureRecord, FeatureStore, StoreError},
 };
 
 const DICE: &str = "dice";
@@ -68,14 +68,18 @@ impl Role {
 pub struct Bot {
     owners: HashSet<String>,
     store: FeatureStore,
-    enabled: RwLock<HashSet<FeatureKey>>,
+    features: RwLock<HashMap<FeatureKey, FeatureRecord>>,
     sessions: Mutex<HashMap<GroupKey, DiceSession>>,
     group_locks: Mutex<HashMap<GroupKey, Arc<Mutex<()>>>>,
     pub napcat: NapcatClient,
 }
 
 impl Bot {
-    pub fn new(config: &Config, store: FeatureStore, enabled: HashSet<FeatureKey>) -> Self {
+    pub fn new(
+        config: &Config,
+        store: FeatureStore,
+        features: HashMap<FeatureKey, FeatureRecord>,
+    ) -> Self {
         let napcat = NapcatClient::new(
             &config.napcat_base_url,
             &config.api_token,
@@ -85,7 +89,7 @@ impl Bot {
         Self {
             owners: config.owners.clone(),
             store,
-            enabled: RwLock::new(enabled),
+            features: RwLock::new(features),
             sessions: Mutex::new(HashMap::new()),
             group_locks: Mutex::new(HashMap::new()),
             napcat,
@@ -157,8 +161,8 @@ impl Bot {
                     text("Dice statistics is already enabled.")
                 } else {
                     let feature = group.feature();
-                    self.store.enable(&feature, user_id.as_str()).await?;
-                    self.enabled.write().await.insert(feature);
+                    let record = self.store.enable(&feature, user_id.as_str()).await?;
+                    self.features.write().await.insert(feature, record);
                     text("Dice statistics enabled.")
                 }
             }
@@ -171,8 +175,9 @@ impl Bot {
                     text("Dice statistics is already disabled.")
                 } else {
                     let feature = group.feature();
-                    self.store.disable(&feature).await?;
-                    self.enabled.write().await.remove(&feature);
+                    if let Some(record) = self.store.disable(&feature).await? {
+                        self.features.write().await.insert(feature, record);
+                    }
                     self.sessions.lock().await.remove(&group);
                     text("Dice statistics disabled.")
                 }
@@ -219,7 +224,11 @@ impl Bot {
     }
 
     async fn is_enabled(&self, group: &GroupKey) -> bool {
-        self.enabled.read().await.contains(&group.feature())
+        self.features
+            .read()
+            .await
+            .get(&group.feature())
+            .is_some_and(|record| record.enabled)
     }
 
     fn can_administer(&self, user_id: &Id, role: Role) -> bool {
@@ -268,7 +277,7 @@ mod tests {
         );
         let config = Config::for_test(url.clone());
         let store = FeatureStore::connect(&url).await.unwrap();
-        Bot::new(&config, store, HashSet::new())
+        Bot::new(&config, store, HashMap::new())
     }
 
     fn event(user: &str, role: &str, message: Vec<MessageSegment>) -> Event {

@@ -35,8 +35,8 @@ pub async fn run() -> Result<(), Error> {
 
     let config = Config::load_from_environment()?;
     let store = FeatureStore::connect(&config.database_url).await?;
-    let enabled = store.load_enabled().await?;
-    let bot = Arc::new(Bot::new(&config, store, enabled));
+    let features = store.load_all().await?;
+    let bot = Arc::new(Bot::new(&config, store, features));
     let state = AppState::new(
         bot,
         config.webhook_token.as_bytes().to_vec(),

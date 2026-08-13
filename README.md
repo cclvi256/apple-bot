@@ -9,7 +9,7 @@
 - `.dice` — start an in-memory session (any member).
 - `.ecid` — end the session and publish scores 6 through 1 (any member).
 
-Only the first dice message from each QQ is counted. Active sessions disappear when the bot restarts. Group feature switches are stored with SQLx in SQLite by default or PostgreSQL when the configured URL uses `postgres:`/`postgresql:`.
+Only the first dice message from each QQ is counted. Active sessions disappear when the bot restarts. Group feature records are stored with SQLx in SQLite by default or PostgreSQL when the configured URL uses `postgres:`/`postgresql:`. Each record retains its enabled state and a format-tagged configuration document when disabled. TOML is the only supported feature-configuration format in this version; no dice configuration keys are interpreted yet.
 
 Commands may be preceded or followed by non-text segments, so `@bot .dice` works. Non-text segments between command text are preserved as typed arguments; the current commands reject them because their usage has only text arguments.
 
@@ -68,7 +68,7 @@ PostgreSQL store compatibility can be exercised when a test instance is availabl
 
 ```sh
 TEST_POSTGRES_URL='postgres://...' \
-  cargo test -p cider-bot store::tests::postgres_feature_switch_round_trip -- --ignored --exact
+  cargo test -p cider-bot store::tests::postgres_feature_store_contract -- --ignored --exact
 ```
 
 Ordinary tests create temporary SQLite databases and never start NapCat or contact QQ. The ignored mock-NapCat test only starts an ephemeral local HTTP server.
