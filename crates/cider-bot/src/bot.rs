@@ -24,10 +24,30 @@ enum DiceSessionMode {
 }
 
 impl DiceSessionMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "strict" => Some(Self::Strict),
+            "common" => Some(Self::Common),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Common => "common",
+        }
+    }
+
     fn from_manifest(manifest: &FeatureManifest) -> Self {
-        match manifest.values().get(SESSION_MODE) {
-            Some(toml::Value::String(value)) if value == "strict" => Self::Strict,
-            Some(toml::Value::String(value)) if value == "common" => Self::Common,
+        match manifest.get(SESSION_MODE) {
+            Some(toml::Value::String(value)) => Self::parse(value).unwrap_or_else(|| {
+                tracing::warn!(
+                    session_mode = value,
+                    "invalid dice session mode; using the default"
+                );
+                Self::default()
+            }),
             None => Self::Common,
             Some(value) => {
                 tracing::warn!(
@@ -54,11 +74,11 @@ impl GroupKey {
         }
     }
 
-    fn feature(&self) -> FeatureKey {
+    fn feature(&self, feature_name: &str) -> FeatureKey {
         FeatureKey {
             self_id: self.self_id.clone(),
             group_id: self.group_id.clone(),
-            feature_name: DICE.into(),
+            feature_name: feature_name.into(),
         }
     }
 }
@@ -185,7 +205,7 @@ impl Bot {
                 } else if self.is_enabled(&group).await {
                     text("Dice statistics is already enabled.")
                 } else {
-                    let feature = group.feature();
+                    let feature = group.feature(DICE);
                     let record = self.store.enable(&feature, user_id.as_str()).await?;
                     self.features.write().await.insert(feature, record);
                     text("Dice statistics enabled.")
@@ -199,7 +219,7 @@ impl Bot {
                 } else if !self.is_enabled(&group).await {
                     text("Dice statistics is already disabled.")
                 } else {
-                    let feature = group.feature();
+                    let feature = group.feature(DICE);
                     if let Some(record) = self.store.disable(&feature).await? {
                         self.features.write().await.insert(feature, record);
                     }
@@ -242,6 +262,23 @@ impl Bot {
                     text("No dice session is active.")
                 }
             }
+            "fset" => {
+                let Some((feature, key, value)) = fset_args(&command.args) else {
+                    return Ok(Some(text("Usage: .fset feature key value")));
+                };
+                if !self.can_administer(user_id, role) {
+                    text("Permission denied.")
+                } else {
+                    self.set_feature_manifest(&group, feature, key, value)
+                        .await?
+                }
+            }
+            "fget" => {
+                let Some((feature, key)) = fget_args(&command.args) else {
+                    return Ok(Some(text("Usage: .fget feature [key]")));
+                };
+                self.get_feature_manifest(&group, feature, key).await?
+            }
             _ => return Ok(None),
         };
         Ok(Some(response))
@@ -260,7 +297,7 @@ impl Bot {
         self.features
             .read()
             .await
-            .get(&group.feature())
+            .get(&group.feature(DICE))
             .is_some_and(|record| record.enabled)
     }
 
@@ -268,9 +305,89 @@ impl Bot {
         self.features
             .read()
             .await
-            .get(&group.feature())
+            .get(&group.feature(DICE))
             .map(|record| DiceSessionMode::from_manifest(&record.manifest))
             .unwrap_or_default()
+    }
+
+    async fn set_feature_manifest(
+        &self,
+        group: &GroupKey,
+        feature_name: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<QuickOperation, StoreError> {
+        if feature_name != DICE {
+            return Ok(text("Unknown feature."));
+        }
+        if key.contains('.') {
+            return Ok(text("Nested manifest keys are not supported."));
+        }
+
+        let feature = group.feature(feature_name);
+        let Some(record) = self
+            .features
+            .read()
+            .await
+            .get(&feature)
+            .filter(|record| record.enabled)
+            .cloned()
+        else {
+            return Ok(text("Feature is disabled."));
+        };
+        if key != SESSION_MODE {
+            return Ok(text("Unknown manifest key."));
+        }
+        let Some(value) = DiceSessionMode::parse(value) else {
+            return Ok(text("Invalid manifest value."));
+        };
+
+        let mut manifest = record.manifest;
+        manifest.set_string(SESSION_MODE, value.as_str());
+        let Some(record) = self.store.update_manifest(&feature, &manifest).await? else {
+            return Ok(text("Feature is disabled."));
+        };
+        self.features.write().await.insert(feature, record);
+        Ok(text("Feature manifest updated."))
+    }
+
+    async fn get_feature_manifest(
+        &self,
+        group: &GroupKey,
+        feature_name: &str,
+        key: Option<&str>,
+    ) -> Result<QuickOperation, StoreError> {
+        if feature_name != DICE {
+            return Ok(text("Unknown feature."));
+        }
+        if key.is_some_and(|key| key.contains('.')) {
+            return Ok(text("Nested manifest keys are not supported."));
+        }
+
+        let feature = group.feature(feature_name);
+        let Some(manifest) = self
+            .features
+            .read()
+            .await
+            .get(&feature)
+            .filter(|record| record.enabled)
+            .map(|record| record.manifest.clone())
+        else {
+            return Ok(text("Feature is disabled."));
+        };
+
+        let output = match key {
+            Some(SESSION_MODE) => match manifest.selected_toml(SESSION_MODE)? {
+                Some(value) => value,
+                None => return Ok(text("Manifest key is not set.")),
+            },
+            Some(_) => return Ok(text("Unknown manifest key.")),
+            None if manifest.values().is_empty() => {
+                return Ok(text("Feature manifest is empty."));
+            }
+            None => manifest.to_toml()?,
+        };
+        Ok(QuickOperation::text(output))
     }
 
     fn can_administer(&self, user_id: &Id, role: Role) -> bool {
@@ -280,6 +397,25 @@ impl Bot {
 
 fn only_dice(args: &[CommandArg]) -> bool {
     matches!(args, [CommandArg::Text(value)] if value == DICE)
+}
+
+fn fset_args(args: &[CommandArg]) -> Option<(&str, &str, &str)> {
+    match args {
+        [
+            CommandArg::Text(feature),
+            CommandArg::Text(key),
+            CommandArg::Text(value),
+        ] => Some((feature, key, value)),
+        _ => None,
+    }
+}
+
+fn fget_args(args: &[CommandArg]) -> Option<(&str, Option<&str>)> {
+    match args {
+        [CommandArg::Text(feature)] => Some((feature, None)),
+        [CommandArg::Text(feature), CommandArg::Text(key)] => Some((feature, Some(key))),
+        _ => None,
+    }
 }
 
 fn text(value: &'static str) -> QuickOperation {
@@ -334,7 +470,7 @@ mod tests {
             self_id: "999".into(),
             group_id: "200".into(),
         }
-        .feature();
+        .feature(DICE);
         store.enable(&feature, "10000").await.unwrap();
         if let Some(source) = manifest {
             let manifest = FeatureManifest::from_toml(source).unwrap();
@@ -542,5 +678,189 @@ mod tests {
                 QuickOperation::reply(statistics_message(&[(Id::new("41").unwrap(), 2)]))
             );
         }
+    }
+
+    #[tokio::test]
+    async fn manifest_commands_persist_values_and_update_dice_behavior() {
+        let bot = test_bot_with_enabled_dice(None).await;
+
+        let empty = bot
+            .process(event(
+                "50",
+                "member",
+                vec![MessageSegment::text(".fget dice")],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(empty, QuickOperation::text("Feature manifest is empty."));
+        let unset = bot
+            .process(event(
+                "50",
+                "member",
+                vec![MessageSegment::text(".fget dice session_mode")],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unset, QuickOperation::text("Manifest key is not set."));
+
+        let denied = bot
+            .process(event(
+                "50",
+                "member",
+                vec![MessageSegment::text(".fset dice session_mode strict")],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(denied, QuickOperation::text("Permission denied."));
+
+        let updated = bot
+            .process(event(
+                "51",
+                "admin",
+                vec![MessageSegment::text(".fset dice session_mode strict")],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated, QuickOperation::text("Feature manifest updated."));
+        for command in [".fget dice", ".fget dice session_mode"] {
+            let value = bot
+                .process(event("50", "member", vec![MessageSegment::text(command)]))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(value, QuickOperation::text("session_mode = \"strict\"\n"));
+        }
+        let stored = bot.store.load_all().await.unwrap();
+        assert_eq!(
+            stored[&GroupKey {
+                self_id: "999".into(),
+                group_id: "200".into(),
+            }
+            .feature(DICE)]
+                .manifest
+                .get(SESSION_MODE),
+            Some(&toml::Value::String("strict".into()))
+        );
+
+        bot.process(event("50", "member", vec![MessageSegment::text(".dice")]))
+            .await
+            .unwrap();
+        let strict = bot
+            .process(event("50", "member", vec![MessageSegment::text(".dice")]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            strict,
+            QuickOperation::text("A dice session is already active.")
+        );
+
+        bot.process(event(
+            "51",
+            "admin",
+            vec![MessageSegment::text(".fset dice session_mode common")],
+        ))
+        .await
+        .unwrap();
+        let common = bot
+            .process(event("50", "member", vec![MessageSegment::text(".dice")]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(common, QuickOperation::reply(statistics_message(&[])));
+    }
+
+    #[tokio::test]
+    async fn manifest_commands_validate_feature_schema_and_usage() {
+        let bot = test_bot().await;
+        for (command, expected) in [
+            (".fget unknown", "Unknown feature."),
+            (".fset unknown key value", "Unknown feature."),
+            (".fget dice", "Feature is disabled."),
+            (".fset dice session_mode strict", "Feature is disabled."),
+            (".fget", "Usage: .fget feature [key]"),
+            (".fget dice one two", "Usage: .fget feature [key]"),
+            (".fset dice session_mode", "Usage: .fset feature key value"),
+            (
+                ".fset dice session_mode strict extra",
+                "Usage: .fset feature key value",
+            ),
+        ] {
+            let role = if command.starts_with(".fset") {
+                "admin"
+            } else {
+                "member"
+            };
+            let response = bot
+                .process(event(
+                    role_id(role),
+                    role,
+                    vec![MessageSegment::text(command)],
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response, QuickOperation::text(expected), "{command}");
+        }
+
+        bot.process(event(
+            "51",
+            "admin",
+            vec![MessageSegment::text(".enable dice")],
+        ))
+        .await
+        .unwrap();
+        for (command, expected) in [
+            (
+                ".fset dice session.strict true",
+                "Nested manifest keys are not supported.",
+            ),
+            (
+                ".fget dice session.strict",
+                "Nested manifest keys are not supported.",
+            ),
+            (".fset dice unknown value", "Unknown manifest key."),
+            (".fget dice unknown", "Unknown manifest key."),
+            (
+                ".fset dice session_mode permissive",
+                "Invalid manifest value.",
+            ),
+        ] {
+            let role = if command.starts_with(".fset") {
+                "admin"
+            } else {
+                "member"
+            };
+            let response = bot
+                .process(event(
+                    role_id(role),
+                    role,
+                    vec![MessageSegment::text(command)],
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response, QuickOperation::text(expected), "{command}");
+        }
+
+        let ignored = bot
+            .process(event(
+                "51",
+                "admin",
+                vec![MessageSegment::text(
+                    ".fseta dice session.options[0] strict",
+                )],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(ignored, None);
+    }
+
+    fn role_id(role: &str) -> &str {
+        if role == "admin" { "51" } else { "50" }
     }
 }

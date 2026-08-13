@@ -12,45 +12,55 @@ pub struct FeatureKey {
     pub feature_name: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ManifestFormat {
-    Toml,
-    Unsupported(String),
-}
-
-impl ManifestFormat {
-    fn parse(value: String) -> Self {
-        if value == "toml" {
-            Self::Toml
-        } else {
-            Self::Unsupported(value)
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Toml => "toml",
-            Self::Unsupported(value) => value,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FeatureManifest {
     values: toml::Table,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestParseError {
+    #[error("failed to parse TOML manifest: {0}")]
+    Toml(#[from] toml::de::Error),
+    #[error("nested manifest key is not supported: {0}")]
+    NestedKey(String),
+}
+
 impl FeatureManifest {
-    pub fn from_toml(value: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(value).map(|values| Self { values })
+    pub fn from_toml(value: &str) -> Result<Self, ManifestParseError> {
+        let values: toml::Table = toml::from_str(value)?;
+        if let Some(key) = values
+            .iter()
+            .find_map(|(key, value)| value.is_table().then(|| key.clone()))
+        {
+            return Err(ManifestParseError::NestedKey(key));
+        }
+        Ok(Self { values })
     }
 
     pub fn values(&self) -> &toml::Table {
         &self.values
     }
 
-    fn encode(&self) -> Result<String, toml::ser::Error> {
+    pub fn get(&self, key: &str) -> Option<&toml::Value> {
+        self.values.get(key)
+    }
+
+    pub fn set_string(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.values
+            .insert(key.into(), toml::Value::String(value.into()));
+    }
+
+    pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
         toml::to_string(&self.values)
+    }
+
+    pub fn selected_toml(&self, key: &str) -> Result<Option<String>, toml::ser::Error> {
+        let Some(value) = self.get(key) else {
+            return Ok(None);
+        };
+        let mut selected = toml::Table::new();
+        selected.insert(key.into(), value.clone());
+        toml::to_string(&selected).map(Some)
     }
 }
 
@@ -61,8 +71,6 @@ pub struct FeatureRecord {
     pub enabled: bool,
     pub enabled_by: String,
     pub enabled_at: i64,
-    pub manifest_format: ManifestFormat,
-    pub manifest_source: String,
     pub manifest: FeatureManifest,
 }
 
@@ -107,7 +115,7 @@ impl FeatureStore {
         let rows = sqlx::query(
             "SELECT id, self_id, group_id, feature_name, \
              CAST(CASE WHEN enabled THEN 1 ELSE 0 END AS BIGINT) AS enabled_value, \
-             enabled_by, enabled_at, manifest_format, manifest FROM group_features",
+             enabled_by, enabled_at, manifest FROM group_features",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -163,9 +171,9 @@ impl FeatureStore {
         key: &FeatureKey,
         manifest: &FeatureManifest,
     ) -> Result<Option<FeatureRecord>, StoreError> {
-        let manifest = manifest.encode()?;
+        let manifest = manifest.to_toml()?;
         let result = sqlx::query(
-            "UPDATE group_features SET manifest_format = 'toml', manifest = ? \
+            "UPDATE group_features SET manifest = ? \
              WHERE self_id = ? AND group_id = ? AND feature_name = ?",
         )
         .bind(manifest)
@@ -189,7 +197,7 @@ impl FeatureStore {
         sqlx::query(
             "SELECT id, self_id, group_id, feature_name, \
              CAST(CASE WHEN enabled THEN 1 ELSE 0 END AS BIGINT) AS enabled_value, \
-             enabled_by, enabled_at, manifest_format, manifest FROM group_features \
+             enabled_by, enabled_at, manifest FROM group_features \
              WHERE self_id = ? AND group_id = ? AND feature_name = ?",
         )
         .bind(&key.self_id)
@@ -203,18 +211,11 @@ impl FeatureStore {
 }
 
 fn decode_record(row: sqlx::any::AnyRow) -> FeatureRecord {
-    let format = ManifestFormat::parse(row.get("manifest_format"));
     let manifest_source: String = row.get("manifest");
-    let manifest = match &format {
-        ManifestFormat::Toml => FeatureManifest::from_toml(&manifest_source).unwrap_or_else(|error| {
-            tracing::warn!(%error, "invalid stored TOML feature manifest; using empty manifest");
-            FeatureManifest::default()
-        }),
-        ManifestFormat::Unsupported(value) => {
-            tracing::warn!(manifest_format = %value, "unsupported stored feature manifest format; using empty manifest");
-            FeatureManifest::default()
-        }
-    };
+    let manifest = FeatureManifest::from_toml(&manifest_source).unwrap_or_else(|error| {
+        tracing::warn!(%error, "invalid stored TOML feature manifest; using empty manifest");
+        FeatureManifest::default()
+    });
     FeatureRecord {
         id: row.get("id"),
         key: FeatureKey {
@@ -225,8 +226,6 @@ fn decode_record(row: sqlx::any::AnyRow) -> FeatureRecord {
         enabled: row.get::<i64, _>("enabled_value") != 0,
         enabled_by: row.get("enabled_by"),
         enabled_at: row.get("enabled_at"),
-        manifest_format: format,
-        manifest_source,
         manifest,
     }
 }
@@ -269,8 +268,7 @@ mod tests {
         assert!(initial.id > 0);
         assert!(other.id > initial.id);
         assert!(initial.enabled);
-        assert_eq!(initial.manifest_format, ManifestFormat::Toml);
-        assert!(initial.manifest_source.is_empty());
+        assert!(initial.manifest.values().is_empty());
 
         let manifest = FeatureManifest::from_toml("answer = 42\n").unwrap();
         let updated = store
@@ -321,11 +319,29 @@ mod tests {
         .await
         .unwrap();
         assert!(schema.contains("INTEGER PRIMARY KEY AUTOINCREMENT"));
+        assert!(!schema.contains("manifest_format"));
         assert_feature_store_contract(store).await;
     }
 
+    #[test]
+    fn manifest_is_flat_and_can_serialize_one_selected_key() {
+        let manifest = FeatureManifest::from_toml(
+            "session_mode = \"strict\"\nretries = 3\noptions = [\"a\", \"b\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.selected_toml("session_mode").unwrap().as_deref(),
+            Some("session_mode = \"strict\"\n")
+        );
+        assert_eq!(manifest.selected_toml("missing").unwrap(), None);
+        assert!(matches!(
+            FeatureManifest::from_toml("[session]\nstrict = true\n"),
+            Err(ManifestParseError::NestedKey(key)) if key == "session"
+        ));
+    }
+
     #[tokio::test]
-    async fn invalid_and_unsupported_manifests_fall_back_without_overwrite() {
+    async fn invalid_manifests_fall_back_without_overwrite() {
         let directory = tempdir().unwrap();
         let url = format!(
             "sqlite://{}?mode=rwc",
@@ -334,9 +350,8 @@ mod tests {
         let store = FeatureStore::connect(&url).await.unwrap();
         sqlx::query(
             "INSERT INTO group_features \
-             (self_id, group_id, feature_name, enabled, enabled_by, enabled_at, manifest_format, manifest) \
-             VALUES ('1', '2', 'bad-toml', TRUE, '3', 0, 'toml', 'broken = ['), \
-                    ('1', '2', 'json', TRUE, '3', 0, 'json', '{\"value\":1}')",
+             (self_id, group_id, feature_name, enabled, enabled_by, enabled_at, manifest) \
+             VALUES ('1', '2', 'bad-toml', TRUE, '3', 0, 'broken = [')",
         )
         .execute(&store.pool)
         .await
@@ -349,15 +364,6 @@ mod tests {
             feature_name: "bad-toml".into(),
         }];
         assert!(bad_toml.manifest.values().is_empty());
-        assert_eq!(bad_toml.manifest_source, "broken = [");
-        let unsupported = &records[&FeatureKey {
-            self_id: "1".into(),
-            group_id: "2".into(),
-            feature_name: "json".into(),
-        }];
-        assert!(unsupported.manifest.values().is_empty());
-        assert_eq!(unsupported.manifest_format.as_str(), "json");
-        assert_eq!(unsupported.manifest_source, "{\"value\":1}");
     }
 
     #[tokio::test]
