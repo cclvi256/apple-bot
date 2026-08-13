@@ -1,5 +1,6 @@
 /target
 /.env
+/config/config.toml
 /config/secret.toml
 /config/secret.postgres.toml
 *.sqlite

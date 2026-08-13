@@ -1,10 +1,10 @@
-FROM docker.io/library/rust:1.97-bookworm AS builder
+FROM docker.io/library/rust:trixie AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN cargo build --locked --release -p cider-bot
 
-FROM docker.io/library/debian:bookworm-slim
+FROM docker.io/library/debian:trixie-slim
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
