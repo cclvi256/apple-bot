@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::error::NapcatError;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{Id, MessageSegment};
@@ -10,6 +10,18 @@ pub struct NapcatClient {
     client: reqwest::Client,
     base_url: String,
     api_token: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum NapcatError {
+    #[error("failed to construct NapCat HTTP client: {0}")]
+    Build(#[source] reqwest::Error),
+    #[error("NapCat request failed: {0}")]
+    Transport(#[source] reqwest::Error),
+    #[error("NapCat returned HTTP {0}")]
+    Http(StatusCode),
+    #[error("NapCat rejected the operation with retcode {retcode}: {message}")]
+    Rejected { retcode: i64, message: String },
 }
 
 #[derive(Serialize)]

@@ -1,7 +1,6 @@
 pub mod bot;
 pub mod command;
 pub mod config;
-pub mod error;
 pub mod napcat;
 pub mod protocol;
 pub mod server;
@@ -15,7 +14,19 @@ use server::AppState;
 use store::FeatureStore;
 use tracing_subscriber::EnvFilter;
 
-pub use error::Error;
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Config(#[from] config::ConfigError),
+    #[error(transparent)]
+    Store(#[from] store::StoreError),
+    #[error("invalid listen address: {0}")]
+    ListenAddress(#[from] std::net::AddrParseError),
+    #[error("failed to bind HTTP listener: {0}")]
+    Bind(#[source] std::io::Error),
+    #[error("HTTP server failed: {0}")]
+    Server(#[source] std::io::Error),
+}
 
 pub async fn run() -> Result<(), Error> {
     tracing_subscriber::fmt()

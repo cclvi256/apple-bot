@@ -1,6 +1,5 @@
 use std::{collections::HashMap, time::SystemTime};
 
-use crate::error::{ManifestParseError, StoreError};
 use sqlx::{AnyPool, Row, any::AnyPoolOptions, migrate::Migrator};
 
 static SQLITE_MIGRATOR: Migrator = sqlx::migrate!("./migrations/sqlite");
@@ -16,6 +15,14 @@ pub struct FeatureKey {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FeatureManifest {
     values: toml::Table,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestParseError {
+    #[error("failed to parse TOML manifest: {0}")]
+    Toml(#[from] toml::de::Error),
+    #[error("nested manifest key is not supported: {0}")]
+    NestedKey(String),
 }
 
 impl FeatureManifest {
@@ -70,6 +77,20 @@ pub struct FeatureRecord {
 #[derive(Clone)]
 pub struct FeatureStore {
     pool: AnyPool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    #[error("database operation failed: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("database migration failed: {0}")]
+    Migration(#[from] sqlx::migrate::MigrateError),
+    #[error("failed to serialize feature manifest: {0}")]
+    ManifestSerialization(#[from] toml::ser::Error),
+    #[error("system clock is before the Unix epoch")]
+    Clock,
+    #[error("unsupported database URL")]
+    UnsupportedDatabase,
 }
 
 impl FeatureStore {
