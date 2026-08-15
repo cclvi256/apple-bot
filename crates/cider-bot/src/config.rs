@@ -1,6 +1,5 @@
 use std::{collections::HashSet, env, fs, path::Path};
 
-use crate::error::ConfigError;
 use serde::Deserialize;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/cider-bot/config.toml";
@@ -16,6 +15,30 @@ pub struct Config {
     pub napcat_timeout_ms: u64,
     pub webhook_token: String,
     pub api_token: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("failed to read configuration file {path}: {source}")]
+    Read {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse TOML file {path}: {source}")]
+    Parse {
+        path: String,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("configuration value {0} must not be empty")]
+    Empty(&'static str),
+    #[error("bot.owners contains an invalid QQ number: {0}")]
+    InvalidOwner(String),
+    #[error("database.url must start with sqlite: or postgres:/postgresql:")]
+    UnsupportedDatabase,
+    #[error("napcat.base_url must start with http:// or https://")]
+    InvalidNapcatUrl,
 }
 
 #[derive(Debug, Deserialize)]

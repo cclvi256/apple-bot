@@ -8,10 +8,9 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     command::{self, Command, CommandArg},
     config::Config,
-    error::StoreError,
     napcat::NapcatClient,
     protocol::{Event, Id, MessageSegment, QuickOperation},
-    store::{FeatureKey, FeatureManifest, FeatureRecord, FeatureStore},
+    store::{FeatureKey, FeatureManifest, FeatureRecord, FeatureStore, StoreError},
 };
 
 const DICE: &str = "dice";
