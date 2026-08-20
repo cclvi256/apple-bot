@@ -6,7 +6,10 @@
 
 - `.enable dice|title` — enable a feature (bot owner or group owner/admin). Enabling `title` also verifies that the bot is the group owner.
 - `.disable dice|title` — disable a feature (same permissions). Disabling `dice` discards an active session; disabling `title` also verifies that the bot is still the group owner.
-- `.title @member title text` — give a member a title (bot owner or group owner/admin); the trailing words are joined with spaces.
+- `.title set title text` — set your own title (any member); trailing words are joined with spaces.
+- `.title set @member title text` — set another member's title (bot owner or group owner/admin).
+- `.title erase` — erase your own title (any member).
+- `.title erase @member` — erase another member's title (bot owner or group owner/admin).
 - `.dice` — start an in-memory session (any member). During an active session, its behavior is controlled by `session_mode`.
 - `.ecid` — end the session and publish scores 6 through 1 (any member).
 - `.fset feature key value` — set a manifest value (bot owner or group owner/admin).

@@ -349,10 +349,13 @@ impl Bot {
         role: Role,
         args: &[CommandArg],
     ) -> Result<Option<QuickOperation>, BotError> {
-        let Some((target, title)) = title_args(args) else {
-            return Ok(Some(text("Usage: .title @member title")));
+        let Some(request) = title_args(args) else {
+            return Ok(Some(QuickOperation::text(
+                "Usage: .title set [@member] title\n       .title erase [@member]",
+            )));
         };
-        if !self.can_administer(user_id, role) {
+        let target = request.target.unwrap_or(user_id);
+        if target != user_id && !self.can_administer(user_id, role) {
             return Ok(Some(text("Permission denied.")));
         }
         if !self.is_feature_enabled(&group, TITLE).await {
@@ -361,9 +364,13 @@ impl Bot {
 
         let group_id = Id::new(group.group_id).expect("group key contains a valid ID");
         self.napcat
-            .set_group_special_title(&group_id, target, &title)
+            .set_group_special_title(&group_id, target, &request.title)
             .await?;
-        Ok(Some(text("Title updated.")))
+        Ok(Some(if request.title.is_empty() {
+            text("Title erased.")
+        } else {
+            text("Title updated.")
+        }))
     }
 
     async fn group_lock(&self, group: &GroupKey) -> Arc<Mutex<()>> {
@@ -487,18 +494,43 @@ fn known_feature(feature_name: &str) -> bool {
     matches!(feature_name, DICE | TITLE)
 }
 
-fn title_args(args: &[CommandArg]) -> Option<(&Id, String)> {
-    let [CommandArg::At(target), title @ ..] = args else {
-        return None;
-    };
-    let title = title
-        .iter()
-        .map(|arg| match arg {
-            CommandArg::Text(value) => Some(value.as_str()),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-    (!title.is_empty()).then(|| (target, title.join(" ")))
+#[derive(Debug, Eq, PartialEq)]
+struct TitleRequest<'a> {
+    target: Option<&'a Id>,
+    title: String,
+}
+
+fn title_args(args: &[CommandArg]) -> Option<TitleRequest<'_>> {
+    match args {
+        [CommandArg::Text(operation)] if operation == "erase" => Some(TitleRequest {
+            target: None,
+            title: String::new(),
+        }),
+        [CommandArg::Text(operation), CommandArg::At(target)] if operation == "erase" => {
+            Some(TitleRequest {
+                target: Some(target),
+                title: String::new(),
+            })
+        }
+        [CommandArg::Text(operation), rest @ ..] if operation == "set" => {
+            let (target, title) = match rest {
+                [CommandArg::At(target), title @ ..] => (Some(target), title),
+                title => (None, title),
+            };
+            let title = title
+                .iter()
+                .map(|arg| match arg {
+                    CommandArg::Text(value) => Some(value.as_str()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            (!title.is_empty()).then(|| TitleRequest {
+                target,
+                title: title.join(" "),
+            })
+        }
+        _ => None,
+    }
 }
 
 fn fset_args(args: &[CommandArg]) -> Option<(&str, &str, &str)> {
@@ -609,19 +641,55 @@ mod tests {
     }
 
     #[test]
-    fn title_arguments_require_a_mention_and_join_trailing_text() {
+    fn title_arguments_support_self_and_mentioned_targets() {
         let target = Id::new("42").unwrap();
         assert_eq!(
             title_args(&[
+                CommandArg::Text("set".into()),
                 CommandArg::At(target.clone()),
                 CommandArg::Text("best".into()),
                 CommandArg::Text("member".into()),
             ]),
-            Some((&target, "best member".into()))
+            Some(TitleRequest {
+                target: Some(&target),
+                title: "best member".into(),
+            })
         );
-        assert_eq!(title_args(&[CommandArg::At(target.clone())]), None);
         assert_eq!(
-            title_args(&[CommandArg::At(target), CommandArg::Segment("image".into()),]),
+            title_args(&[
+                CommandArg::Text("set".into()),
+                CommandArg::Text("my".into()),
+                CommandArg::Text("title".into()),
+            ]),
+            Some(TitleRequest {
+                target: None,
+                title: "my title".into(),
+            })
+        );
+        assert_eq!(
+            title_args(&[
+                CommandArg::Text("erase".into()),
+                CommandArg::At(target.clone()),
+            ]),
+            Some(TitleRequest {
+                target: Some(&target),
+                title: String::new(),
+            })
+        );
+        assert_eq!(
+            title_args(&[CommandArg::Text("erase".into())]),
+            Some(TitleRequest {
+                target: None,
+                title: String::new(),
+            })
+        );
+        assert_eq!(title_args(&[CommandArg::Text("set".into())]), None);
+        assert_eq!(
+            title_args(&[
+                CommandArg::Text("set".into()),
+                CommandArg::At(target),
+                CommandArg::Segment("image".into()),
+            ]),
             None
         );
     }
@@ -634,13 +702,13 @@ mod tests {
                 "10000",
                 "member",
                 vec![MessageSegment::text(".title nobody")],
-                "Usage: .title @member title",
+                "Usage: .title set [@member] title\n       .title erase [@member]",
             ),
             (
                 "20",
                 "member",
                 vec![
-                    MessageSegment::text(".title "),
+                    MessageSegment::text(".title set "),
                     MessageSegment::at(&Id::new("42").unwrap()),
                     MessageSegment::text(" best"),
                 ],
@@ -649,11 +717,7 @@ mod tests {
             (
                 "10000",
                 "member",
-                vec![
-                    MessageSegment::text(".title "),
-                    MessageSegment::at(&Id::new("42").unwrap()),
-                    MessageSegment::text(" best"),
-                ],
+                vec![MessageSegment::text(".title set my title")],
                 "Title is disabled in this group.",
             ),
         ] {
@@ -671,8 +735,8 @@ mod tests {
     async fn title_toggles_require_the_bot_to_own_the_group() {
         let bot_role = Arc::new(StdMutex::new("member"));
         let response_role = bot_role.clone();
-        let title_request = Arc::new(StdMutex::new(None));
-        let captured_title_request = title_request.clone();
+        let title_requests = Arc::new(StdMutex::new(Vec::new()));
+        let captured_title_requests = title_requests.clone();
         let app = Router::new()
             .route(
                 "/get_group_member_info",
@@ -689,7 +753,7 @@ mod tests {
             .route(
                 "/set_group_special_title",
                 post(move |Json(body): Json<serde_json::Value>| {
-                    *captured_title_request.lock().unwrap() = Some(body);
+                    captured_title_requests.lock().unwrap().push(body);
                     async {
                         Json(json!({
                             "status": "ok", "retcode": 0, "data": {},
@@ -749,7 +813,7 @@ mod tests {
                 "51",
                 "admin",
                 vec![
-                    MessageSegment::text(".title "),
+                    MessageSegment::text(".title set "),
                     MessageSegment::at(&Id::new("42").unwrap()),
                     MessageSegment::text(" best member"),
                 ],
@@ -758,11 +822,41 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated, QuickOperation::text("Title updated."));
+
+        let self_updated = bot
+            .process(event(
+                "20",
+                "member",
+                vec![MessageSegment::text(".title set my title")],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(self_updated, QuickOperation::text("Title updated."));
+
+        let erased = bot
+            .process(event(
+                "20",
+                "member",
+                vec![MessageSegment::text(".title erase")],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(erased, QuickOperation::text("Title erased."));
         assert_eq!(
-            *title_request.lock().unwrap(),
-            Some(json!({
-                "group_id": "200", "user_id": "42", "special_title": "best member"
-            }))
+            *title_requests.lock().unwrap(),
+            vec![
+                json!({
+                    "group_id": "200", "user_id": "42", "special_title": "best member"
+                }),
+                json!({
+                    "group_id": "200", "user_id": "20", "special_title": "my title"
+                }),
+                json!({
+                    "group_id": "200", "user_id": "20", "special_title": ""
+                }),
+            ]
         );
 
         *bot_role.lock().unwrap() = "member";
