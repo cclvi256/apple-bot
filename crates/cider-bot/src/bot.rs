@@ -8,13 +8,14 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     command::{self, Command, CommandArg},
     config::Config,
-    error::StoreError,
+    error::{BotError, StoreError},
     napcat::NapcatClient,
     protocol::{Event, Id, MessageSegment, QuickOperation},
     store::{FeatureKey, FeatureManifest, FeatureRecord, FeatureStore},
 };
 
 const DICE: &str = "dice";
+const TITLE: &str = "title";
 const SESSION_MODE: &str = "session_mode";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -142,7 +143,7 @@ impl Bot {
         }
     }
 
-    pub async fn process(&self, event: Event) -> Result<Option<QuickOperation>, StoreError> {
+    pub async fn process(&self, event: Event) -> Result<Option<QuickOperation>, BotError> {
         if event.post_type != "message"
             || event.message_type.as_deref() != Some("group")
             || event.sub_type.as_deref() != Some("normal")
@@ -158,8 +159,6 @@ impl Bot {
         }
 
         let group = GroupKey::new(&event.self_id, group_id);
-        let lock = self.group_lock(&group).await;
-        let _guard = lock.lock().await;
 
         if let Some(command) = command::parse(&event.message) {
             let role = Role::parse(
@@ -168,13 +167,29 @@ impl Bot {
                     .as_ref()
                     .and_then(|sender| sender.role.as_deref()),
             );
+            if matches!(command.name.as_str(), "enable" | "disable")
+                && only_feature(&command.args, TITLE)
+            {
+                return self
+                    .handle_title_toggle(group, &event.self_id, user_id, role, &command.name)
+                    .await;
+            }
+            if command.name == TITLE {
+                return self.handle_title(group, user_id, role, &command.args).await;
+            }
+
+            let lock = self.group_lock(&group).await;
+            let _guard = lock.lock().await;
             return self.handle_command(group, user_id, role, command).await;
         }
+
+        let lock = self.group_lock(&group).await;
+        let _guard = lock.lock().await;
 
         let Some(result) = event.message.iter().find_map(MessageSegment::dice_result) else {
             return Ok(None);
         };
-        if !self.is_enabled(&group).await {
+        if !self.is_feature_enabled(&group, DICE).await {
             return Ok(None);
         }
         let mut sessions = self.sessions.lock().await;
@@ -196,14 +211,14 @@ impl Bot {
         user_id: &Id,
         role: Role,
         command: Command,
-    ) -> Result<Option<QuickOperation>, StoreError> {
+    ) -> Result<Option<QuickOperation>, BotError> {
         let response = match command.name.as_str() {
             "enable" => {
-                if !only_dice(&command.args) {
-                    text("Usage: .enable dice")
+                if !only_feature(&command.args, DICE) {
+                    text("Usage: .enable dice|title")
                 } else if !self.can_administer(user_id, role) {
                     text("Permission denied.")
-                } else if self.is_enabled(&group).await {
+                } else if self.is_feature_enabled(&group, DICE).await {
                     text("Dice statistics is already enabled.")
                 } else {
                     let feature = group.feature(DICE);
@@ -213,11 +228,11 @@ impl Bot {
                 }
             }
             "disable" => {
-                if !only_dice(&command.args) {
-                    text("Usage: .disable dice")
+                if !only_feature(&command.args, DICE) {
+                    text("Usage: .disable dice|title")
                 } else if !self.can_administer(user_id, role) {
                     text("Permission denied.")
-                } else if !self.is_enabled(&group).await {
+                } else if !self.is_feature_enabled(&group, DICE).await {
                     text("Dice statistics is already disabled.")
                 } else {
                     let feature = group.feature(DICE);
@@ -231,7 +246,7 @@ impl Bot {
             "dice" => {
                 if !command.args.is_empty() {
                     text("Usage: .dice")
-                } else if !self.is_enabled(&group).await {
+                } else if !self.is_feature_enabled(&group, DICE).await {
                     text("Dice statistics is disabled in this group.")
                 } else {
                     let session_mode = self.dice_session_mode(&group).await;
@@ -255,7 +270,7 @@ impl Bot {
             "ecid" => {
                 if !command.args.is_empty() {
                     text("Usage: .ecid")
-                } else if !self.is_enabled(&group).await {
+                } else if !self.is_feature_enabled(&group, DICE).await {
                     text("Dice statistics is disabled in this group.")
                 } else if let Some(session) = self.sessions.lock().await.remove(&group) {
                     QuickOperation::reply(statistics_message(&session.rolls))
@@ -285,6 +300,72 @@ impl Bot {
         Ok(Some(response))
     }
 
+    async fn handle_title_toggle(
+        &self,
+        group: GroupKey,
+        self_id: &Id,
+        user_id: &Id,
+        role: Role,
+        operation: &str,
+    ) -> Result<Option<QuickOperation>, BotError> {
+        if !self.can_administer(user_id, role) {
+            return Ok(Some(text("Permission denied.")));
+        }
+
+        let group_id = Id::new(group.group_id.clone()).expect("group key contains a valid ID");
+        if self.napcat.group_member_role(&group_id, self_id).await? != "owner" {
+            return Ok(Some(text(
+                "Title feature requires the bot to be the group owner.",
+            )));
+        }
+
+        let lock = self.group_lock(&group).await;
+        let _guard = lock.lock().await;
+        let feature = group.feature(TITLE);
+        let enabled = self.is_feature_enabled(&group, TITLE).await;
+        let response = match operation {
+            "enable" if enabled => text("Title is already enabled."),
+            "enable" => {
+                let record = self.store.enable(&feature, user_id.as_str()).await?;
+                self.features.write().await.insert(feature, record);
+                text("Title enabled.")
+            }
+            "disable" if !enabled => text("Title is already disabled."),
+            "disable" => {
+                if let Some(record) = self.store.disable(&feature).await? {
+                    self.features.write().await.insert(feature, record);
+                }
+                text("Title disabled.")
+            }
+            _ => unreachable!("title toggle operation is validated by the caller"),
+        };
+        Ok(Some(response))
+    }
+
+    async fn handle_title(
+        &self,
+        group: GroupKey,
+        user_id: &Id,
+        role: Role,
+        args: &[CommandArg],
+    ) -> Result<Option<QuickOperation>, BotError> {
+        let Some((target, title)) = title_args(args) else {
+            return Ok(Some(text("Usage: .title @member title")));
+        };
+        if !self.can_administer(user_id, role) {
+            return Ok(Some(text("Permission denied.")));
+        }
+        if !self.is_feature_enabled(&group, TITLE).await {
+            return Ok(Some(text("Title is disabled in this group.")));
+        }
+
+        let group_id = Id::new(group.group_id).expect("group key contains a valid ID");
+        self.napcat
+            .set_group_special_title(&group_id, target, &title)
+            .await?;
+        Ok(Some(text("Title updated.")))
+    }
+
     async fn group_lock(&self, group: &GroupKey) -> Arc<Mutex<()>> {
         self.group_locks
             .lock()
@@ -294,11 +375,11 @@ impl Bot {
             .clone()
     }
 
-    async fn is_enabled(&self, group: &GroupKey) -> bool {
+    async fn is_feature_enabled(&self, group: &GroupKey, feature_name: &str) -> bool {
         self.features
             .read()
             .await
-            .get(&group.feature(DICE))
+            .get(&group.feature(feature_name))
             .is_some_and(|record| record.enabled)
     }
 
@@ -318,7 +399,7 @@ impl Bot {
         key: &str,
         value: &str,
     ) -> Result<QuickOperation, StoreError> {
-        if feature_name != DICE {
+        if !known_feature(feature_name) {
             return Ok(text("Unknown feature."));
         }
         if key.contains('.') {
@@ -336,7 +417,7 @@ impl Bot {
         else {
             return Ok(text("Feature is disabled."));
         };
-        if key != SESSION_MODE {
+        if feature_name != DICE || key != SESSION_MODE {
             return Ok(text("Unknown manifest key."));
         }
         let Some(value) = DiceSessionMode::parse(value) else {
@@ -358,7 +439,7 @@ impl Bot {
         feature_name: &str,
         key: Option<&str>,
     ) -> Result<QuickOperation, StoreError> {
-        if feature_name != DICE {
+        if !known_feature(feature_name) {
             return Ok(text("Unknown feature."));
         }
         if key.is_some_and(|key| key.contains('.')) {
@@ -378,10 +459,12 @@ impl Bot {
         };
 
         let output = match key {
-            Some(SESSION_MODE) => match manifest.selected_toml(SESSION_MODE)? {
-                Some(value) => value,
-                None => return Ok(text("Manifest key is not set.")),
-            },
+            Some(SESSION_MODE) if feature_name == DICE => {
+                match manifest.selected_toml(SESSION_MODE)? {
+                    Some(value) => value,
+                    None => return Ok(text("Manifest key is not set.")),
+                }
+            }
             Some(_) => return Ok(text("Unknown manifest key.")),
             None if manifest.values().is_empty() => {
                 return Ok(text("Feature manifest is empty."));
@@ -396,8 +479,26 @@ impl Bot {
     }
 }
 
-fn only_dice(args: &[CommandArg]) -> bool {
-    matches!(args, [CommandArg::Text(value)] if value == DICE)
+fn only_feature(args: &[CommandArg], feature_name: &str) -> bool {
+    matches!(args, [CommandArg::Text(value)] if value == feature_name)
+}
+
+fn known_feature(feature_name: &str) -> bool {
+    matches!(feature_name, DICE | TITLE)
+}
+
+fn title_args(args: &[CommandArg]) -> Option<(&Id, String)> {
+    let [CommandArg::At(target), title @ ..] = args else {
+        return None;
+    };
+    let title = title
+        .iter()
+        .map(|arg| match arg {
+            CommandArg::Text(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!title.is_empty()).then(|| (target, title.join(" ")))
 }
 
 fn fset_args(args: &[CommandArg]) -> Option<(&str, &str, &str)> {
@@ -442,6 +543,9 @@ fn statistics_message(rolls: &[(Id, u8)]) -> Vec<MessageSegment> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use axum::{Json, Router, routing::post};
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -502,6 +606,181 @@ mod tests {
             kind: "dice".into(),
             data: json!({"result": result}),
         }
+    }
+
+    #[test]
+    fn title_arguments_require_a_mention_and_join_trailing_text() {
+        let target = Id::new("42").unwrap();
+        assert_eq!(
+            title_args(&[
+                CommandArg::At(target.clone()),
+                CommandArg::Text("best".into()),
+                CommandArg::Text("member".into()),
+            ]),
+            Some((&target, "best member".into()))
+        );
+        assert_eq!(title_args(&[CommandArg::At(target.clone())]), None);
+        assert_eq!(
+            title_args(&[CommandArg::At(target), CommandArg::Segment("image".into()),]),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn title_assignment_requires_valid_usage_permission_and_enabled_feature() {
+        let bot = test_bot().await;
+        for (user, role, message, expected) in [
+            (
+                "10000",
+                "member",
+                vec![MessageSegment::text(".title nobody")],
+                "Usage: .title @member title",
+            ),
+            (
+                "20",
+                "member",
+                vec![
+                    MessageSegment::text(".title "),
+                    MessageSegment::at(&Id::new("42").unwrap()),
+                    MessageSegment::text(" best"),
+                ],
+                "Permission denied.",
+            ),
+            (
+                "10000",
+                "member",
+                vec![
+                    MessageSegment::text(".title "),
+                    MessageSegment::at(&Id::new("42").unwrap()),
+                    MessageSegment::text(" best"),
+                ],
+                "Title is disabled in this group.",
+            ),
+        ] {
+            let response = bot
+                .process(event(user, role, message))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response, QuickOperation::text(expected));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires loopback networking"]
+    async fn title_toggles_require_the_bot_to_own_the_group() {
+        let bot_role = Arc::new(StdMutex::new("member"));
+        let response_role = bot_role.clone();
+        let title_request = Arc::new(StdMutex::new(None));
+        let captured_title_request = title_request.clone();
+        let app = Router::new()
+            .route(
+                "/get_group_member_info",
+                post(move || {
+                    let role = *response_role.lock().unwrap();
+                    async move {
+                        Json(json!({
+                            "status": "ok", "retcode": 0, "data": {"role": role},
+                            "message": "", "wording": ""
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/set_group_special_title",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    *captured_title_request.lock().unwrap() = Some(body);
+                    async {
+                        Json(json!({
+                            "status": "ok", "retcode": 0, "data": {},
+                            "message": "", "wording": ""
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let directory = tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("title.sqlite").display()
+        );
+        let mut config = Config::for_test(url.clone());
+        config.napcat_base_url = format!("http://{address}");
+        let store = FeatureStore::connect(&url).await.unwrap();
+        let bot = Bot::new(&config, store, HashMap::new());
+        let group = GroupKey {
+            self_id: "999".into(),
+            group_id: "200".into(),
+        };
+
+        let denied = bot
+            .process(event(
+                "10000",
+                "member",
+                vec![MessageSegment::text(".enable title")],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            denied,
+            QuickOperation::text("Title feature requires the bot to be the group owner.")
+        );
+        assert!(!bot.is_feature_enabled(&group, TITLE).await);
+
+        *bot_role.lock().unwrap() = "owner";
+        let enabled = bot
+            .process(event(
+                "10000",
+                "member",
+                vec![MessageSegment::text(".enable title")],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(enabled, QuickOperation::text("Title enabled."));
+        assert!(bot.is_feature_enabled(&group, TITLE).await);
+
+        let updated = bot
+            .process(event(
+                "51",
+                "admin",
+                vec![
+                    MessageSegment::text(".title "),
+                    MessageSegment::at(&Id::new("42").unwrap()),
+                    MessageSegment::text(" best member"),
+                ],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated, QuickOperation::text("Title updated."));
+        assert_eq!(
+            *title_request.lock().unwrap(),
+            Some(json!({
+                "group_id": "200", "user_id": "42", "special_title": "best member"
+            }))
+        );
+
+        *bot_role.lock().unwrap() = "member";
+        let denied = bot
+            .process(event(
+                "10000",
+                "member",
+                vec![MessageSegment::text(".disable title")],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            denied,
+            QuickOperation::text("Title feature requires the bot to be the group owner.")
+        );
+        assert!(bot.is_feature_enabled(&group, TITLE).await);
+        server.abort();
     }
 
     #[tokio::test]

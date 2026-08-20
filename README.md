@@ -1,17 +1,20 @@
 # cider-bot
 
-`cider-bot` is a Rust OneBot 11 bot designed for NapCat. The bot core supports feature modules; dice statistics is the first and currently only module.
+`cider-bot` is a Rust OneBot 11 bot designed for NapCat. The bot core currently supports dice statistics and group-member titles.
 
 ## Commands
 
-- `.enable dice` — enable the feature (bot owner or group owner/admin).
-- `.disable dice` — disable it and discard an active session (same permissions).
+- `.enable dice|title` — enable a feature (bot owner or group owner/admin). Enabling `title` also verifies that the bot is the group owner.
+- `.disable dice|title` — disable a feature (same permissions). Disabling `dice` discards an active session; disabling `title` also verifies that the bot is still the group owner.
+- `.title @member title text` — give a member a title (bot owner or group owner/admin); the trailing words are joined with spaces.
 - `.dice` — start an in-memory session (any member). During an active session, its behavior is controlled by `session_mode`.
 - `.ecid` — end the session and publish scores 6 through 1 (any member).
 - `.fset feature key value` — set a manifest value (bot owner or group owner/admin).
 - `.fget feature [key]` — show a stored manifest or one manifest assignment (any member).
 
 Only the first dice message from each QQ is counted. Active sessions disappear when the bot restarts. Group feature records are stored with SQLx in SQLite by default or PostgreSQL when the configured URL uses `postgres:`/`postgresql:`. Each record retains its enabled state and TOML manifest when disabled. The manifest holds explicitly assigned feature data.
+
+The `title` feature is disabled by default. NapCat permits setting special titles only when the bot account owns the group, so `.enable title` and `.disable title` query the bot's current group-member role before changing persisted state. Title assignment uses NapCat's `/set_group_special_title` action and is not attempted while the feature is disabled.
 
 Feature manifests are flat, schema-validated TOML documents. The dice manifest currently supports only `session_mode = "strict" | "common"`; set it with `.fset dice session_mode strict` or `.fset dice session_mode common`. The default is `common`, so the key may be omitted: `.dice` during an active session publishes its statistics and immediately starts a new session. `strict` preserves the earlier behavior and replies that a session is already active. Manifest commands operate only while the feature is enabled. Nested keys and array assignment are not supported.
 

@@ -15,6 +15,14 @@ pub enum Error {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum BotError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Napcat(#[from] NapcatError),
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("failed to read configuration file {path}: {source}")]
     Read {
@@ -56,6 +64,8 @@ pub enum NapcatError {
     Http(StatusCode),
     #[error("NapCat rejected the operation with retcode {retcode}: {message}")]
     Rejected { retcode: i64, message: String },
+    #[error("NapCat returned an invalid action response: {0}")]
+    InvalidResponse(&'static str),
 }
 
 #[derive(Debug, thiserror::Error)]
